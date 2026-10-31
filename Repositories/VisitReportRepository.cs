@@ -1,10 +1,21 @@
 ﻿using System.Data;
+using System.Data.Common;
 using HeadLendingVisitReportApi.Data;
 using HeadLendingVisitReportApi.Models.Dtos;
-using Microsoft.Data.SqlClient;
+using Npgsql;
+using NpgsqlTypes;
+using static HeadLendingVisitReportApi.Data.PgCommand;
 
 namespace HeadLendingVisitReportApi.Repositories;
 
+/// <summary>
+/// PostgreSQL (Npgsql) version. Every former SQL Server stored procedure is a
+/// PostgreSQL function of the same name (see Scripts/PostgreSQL). Procedures
+/// that returned several result sets are now several functions sent in one
+/// batched command, so the NextResultAsync() reading logic is unchanged.
+/// Table-Valued Parameters are sent as JSONB arrays built from the same
+/// DataTables as before.
+/// </summary>
 public class VisitReportRepository : IVisitReportRepository
 {
     private readonly ISqlConnectionFactory _connectionFactory;
@@ -19,13 +30,11 @@ public class VisitReportRepository : IVisitReportRepository
         try
         {
             using var connection = _connectionFactory.CreateConnection();
-            using var command = new SqlCommand("dbo.usp_VisitReport_Create", connection)
-            {
-                CommandType = CommandType.StoredProcedure
-            };
+            using var command = new NpgsqlCommand { Connection = connection };
 
             AddHeaderParameters(command, dto);
             AddTvpParameters(command, dto);
+            command.CommandText = Call("dbo.usp_VisitReport_Create", command.Parameters.Select(p => p.ParameterName).ToArray());
 
             await connection.OpenAsync();
 
@@ -33,7 +42,7 @@ public class VisitReportRepository : IVisitReportRepository
 
             return Convert.ToInt32(result);
         }
-        catch (SqlException ex)
+        catch (NpgsqlException ex)
         {
             throw new Exception($"Failed to create visit report: {ex.Message}", ex);
         }
@@ -41,14 +50,12 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<bool> UpdateAsync(int id, VisitReportDto dto)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_Update", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
+        using var command = new NpgsqlCommand { Connection = connection };
 
-        command.Parameters.Add(new SqlParameter("@Id", SqlDbType.Int) { Value = id });
+        command.Parameters.Add(P("Id", NpgsqlDbType.Integer, id));
         AddHeaderParameters(command, dto);
         AddTvpParameters(command, dto);
+        command.CommandText = Call("dbo.usp_VisitReport_Update", command.Parameters.Select(p => p.ParameterName).ToArray());
 
         await connection.OpenAsync();
         var result = await command.ExecuteScalarAsync();
@@ -57,11 +64,16 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<VisitReportDto> GetByIdAsync(int id)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_GetById", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add(new SqlParameter("@Id", SqlDbType.Int) { Value = id });
+        // 7 result sets, same order as the old usp_VisitReport_GetById
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_GetById", "Id"),
+            Call("dbo.usp_VisitReport_GetBusinessDevelopments", "Id"),
+            Call("dbo.usp_VisitReport_GetCashManagements", "Id"),
+            Call("dbo.usp_VisitReport_GetNpaOdManagements", "Id"),
+            Call("dbo.usp_VisitReport_GetNpaBorrowers", "Id"),
+            Call("dbo.usp_VisitReport_GetConcurrentAudits", "Id"),
+            Call("dbo.usp_Attachment_GetByVisitReportId", "Id")), connection);
+        command.Parameters.Add(P("Id", NpgsqlDbType.Integer, id));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -94,22 +106,23 @@ public class VisitReportRepository : IVisitReportRepository
         query ??= new VisitReportQuery();
 
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_GetAll", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
 
         var email = FirstNonEmpty(query.Email, query.ViewerEmail, query.email);
 
-        command.Parameters.Add(new SqlParameter("@Page", SqlDbType.Int) { Value = query.Page < 1 ? 1 : query.Page });
-        command.Parameters.Add(new SqlParameter("@PageSize", SqlDbType.Int) { Value = query.PageSize < 1 ? 20 : query.PageSize });
-        command.Parameters.Add(new SqlParameter("@BranchName", SqlDbType.NVarChar, 200) { Value = DbStr(query.BranchName) });
-        command.Parameters.Add(new SqlParameter("@EmployeeCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmployeeCode) });
-        command.Parameters.Add(new SqlParameter("@FromDate", SqlDbType.DateTime2) { Value = (object)query.FromDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ToDate", SqlDbType.DateTime2) { Value = (object)query.ToDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@Email", SqlDbType.NVarChar, 256) { Value = DbStr(email) });
-        command.Parameters.Add(new SqlParameter("@SelectedEmpCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.SelectedEmpCode) });
-        command.Parameters.Add(new SqlParameter("@ViewRole", SqlDbType.NVarChar, 50) { Value = DbStr(query.ViewRole) });
+        var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "SelectedEmpCode", "ViewRole" };
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_GetAll", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()),
+            Call("dbo.usp_VisitReport_GetAll_Count", filterNames)), connection);
+
+        command.Parameters.Add(P("Page", NpgsqlDbType.Integer, query.Page < 1 ? 1 : query.Page));
+        command.Parameters.Add(P("PageSize", NpgsqlDbType.Integer, query.PageSize < 1 ? 20 : query.PageSize));
+        command.Parameters.Add(P("BranchName", NpgsqlDbType.Varchar, DbStr(query.BranchName)));
+        command.Parameters.Add(P("EmployeeCode", NpgsqlDbType.Varchar, DbStr(query.EmployeeCode)));
+        command.Parameters.Add(P("FromDate", NpgsqlDbType.Timestamp, ToDbDate(query.FromDate)));
+        command.Parameters.Add(P("ToDate", NpgsqlDbType.Timestamp, ToDbDate(query.ToDate)));
+        command.Parameters.Add(P("Email", NpgsqlDbType.Varchar, DbStr(email)));
+        command.Parameters.Add(P("SelectedEmpCode", NpgsqlDbType.Varchar, DbStr(query.SelectedEmpCode)));
+        command.Parameters.Add(P("ViewRole", NpgsqlDbType.Varchar, DbStr(query.ViewRole)));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -141,23 +154,25 @@ public class VisitReportRepository : IVisitReportRepository
         var empCode = FirstNonEmpty(query.EmpCode, query.empCode);
 
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_GetByRoleTeam", connection)
+        var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "EmpCode", "EmpType", "Search", "RoleName" };
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_GetByRoleTeam", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()),
+            Call("dbo.usp_VisitReport_GetByRoleTeam_Count", filterNames)), connection)
         {
-            CommandType = CommandType.StoredProcedure,
             CommandTimeout = 60
         };
 
-        command.Parameters.Add(new SqlParameter("@Page", SqlDbType.Int) { Value = query.Page < 1 ? 1 : query.Page });
-        command.Parameters.Add(new SqlParameter("@PageSize", SqlDbType.Int) { Value = query.PageSize < 1 ? 20 : query.PageSize });
-        command.Parameters.Add(new SqlParameter("@BranchName", SqlDbType.NVarChar, 200) { Value = DbStr(query.BranchName) });
-        command.Parameters.Add(new SqlParameter("@EmployeeCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmployeeCode) });
-        command.Parameters.Add(new SqlParameter("@FromDate", SqlDbType.DateTime2) { Value = (object)query.FromDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ToDate", SqlDbType.DateTime2) { Value = (object)query.ToDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@Email", SqlDbType.NVarChar, 256) { Value = DbStr(email) });
-        command.Parameters.Add(new SqlParameter("@EmpCode", SqlDbType.NVarChar, 50) { Value = DbStr(empCode) });
-        command.Parameters.Add(new SqlParameter("@EmpType", SqlDbType.NVarChar, 50) { Value = DbStr(empType) });
-        command.Parameters.Add(new SqlParameter("@Search", SqlDbType.NVarChar, 200) { Value = DbStr(query.Search) });
-        command.Parameters.Add(new SqlParameter("@RoleName", SqlDbType.NVarChar, 50) { Value = DBNull.Value });
+        command.Parameters.Add(P("Page", NpgsqlDbType.Integer, query.Page < 1 ? 1 : query.Page));
+        command.Parameters.Add(P("PageSize", NpgsqlDbType.Integer, query.PageSize < 1 ? 20 : query.PageSize));
+        command.Parameters.Add(P("BranchName", NpgsqlDbType.Varchar, DbStr(query.BranchName)));
+        command.Parameters.Add(P("EmployeeCode", NpgsqlDbType.Varchar, DbStr(query.EmployeeCode)));
+        command.Parameters.Add(P("FromDate", NpgsqlDbType.Timestamp, ToDbDate(query.FromDate)));
+        command.Parameters.Add(P("ToDate", NpgsqlDbType.Timestamp, ToDbDate(query.ToDate)));
+        command.Parameters.Add(P("Email", NpgsqlDbType.Varchar, DbStr(email)));
+        command.Parameters.Add(P("EmpCode", NpgsqlDbType.Varchar, DbStr(empCode)));
+        command.Parameters.Add(P("EmpType", NpgsqlDbType.Varchar, DbStr(empType)));
+        command.Parameters.Add(P("Search", NpgsqlDbType.Varchar, DbStr(query.Search)));
+        command.Parameters.Add(P("RoleName", NpgsqlDbType.Varchar, DBNull.Value));
 
         await connection.OpenAsync();
 
@@ -181,20 +196,22 @@ public class VisitReportRepository : IVisitReportRepository
         query ??= new AdminVisitReportQuery();
 
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_AdminVisitSummary", connection)
+        var filterNames = new[] { "FromDate", "ToDate", "EmpType", "Creator", "BranchCode", "EmployeeCode" };
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_AdminVisitSummary", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()),
+            Call("dbo.usp_VisitReport_AdminVisitSummary_Count", filterNames)), connection)
         {
-            CommandType = CommandType.StoredProcedure,
             CommandTimeout = 60
         };
 
-        command.Parameters.Add(new SqlParameter("@Page", SqlDbType.Int) { Value = query.Page < 1 ? 1 : query.Page });
-        command.Parameters.Add(new SqlParameter("@PageSize", SqlDbType.Int) { Value = query.PageSize < 1 ? 10 : query.PageSize });
-        command.Parameters.Add(new SqlParameter("@FromDate", SqlDbType.DateTime2) { Value = (object)query.FromDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ToDate", SqlDbType.DateTime2) { Value = (object)query.ToDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@EmpType", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmpType) });
-        command.Parameters.Add(new SqlParameter("@Creator", SqlDbType.NVarChar, 100) { Value = DbStr(query.Creator) });
-        command.Parameters.Add(new SqlParameter("@BranchCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.BranchCode) });
-        command.Parameters.Add(new SqlParameter("@EmployeeCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmployeeCode) });
+        command.Parameters.Add(P("Page", NpgsqlDbType.Integer, query.Page < 1 ? 1 : query.Page));
+        command.Parameters.Add(P("PageSize", NpgsqlDbType.Integer, query.PageSize < 1 ? 10 : query.PageSize));
+        command.Parameters.Add(P("FromDate", NpgsqlDbType.Timestamp, query.FromDate));
+        command.Parameters.Add(P("ToDate", NpgsqlDbType.Timestamp, query.ToDate));
+        command.Parameters.Add(P("EmpType", NpgsqlDbType.Varchar, DbStr(query.EmpType)));
+        command.Parameters.Add(P("Creator", NpgsqlDbType.Varchar, DbStr(query.Creator)));
+        command.Parameters.Add(P("BranchCode", NpgsqlDbType.Varchar, DbStr(query.BranchCode)));
+        command.Parameters.Add(P("EmployeeCode", NpgsqlDbType.Varchar, DbStr(query.EmployeeCode)));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -231,18 +248,14 @@ public class VisitReportRepository : IVisitReportRepository
             throw new ArgumentException("EmployeeCode is required.");
 
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_AdminVisitDetails", connection)
-        {
-            CommandType = CommandType.StoredProcedure,
-            CommandTimeout = 60
-        };
-
-        command.Parameters.Add(new SqlParameter("@FromDate", SqlDbType.DateTime2) { Value = (object)query.FromDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ToDate", SqlDbType.DateTime2) { Value = (object)query.ToDate ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@EmployeeCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmployeeCode) });
-        command.Parameters.Add(new SqlParameter("@EmpType", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmpType) });
-        command.Parameters.Add(new SqlParameter("@Creator", SqlDbType.NVarChar, 100) { Value = DbStr(query.Creator) });
-        command.Parameters.Add(new SqlParameter("@BranchCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.BranchCode) });
+        using var command = Function(connection, "dbo.usp_VisitReport_AdminVisitDetails",
+            P("FromDate", NpgsqlDbType.Timestamp, query.FromDate),
+            P("ToDate", NpgsqlDbType.Timestamp, query.ToDate),
+            P("EmployeeCode", NpgsqlDbType.Varchar, DbStr(query.EmployeeCode)),
+            P("EmpType", NpgsqlDbType.Varchar, DbStr(query.EmpType)),
+            P("Creator", NpgsqlDbType.Varchar, DbStr(query.Creator)),
+            P("BranchCode", NpgsqlDbType.Varchar, DbStr(query.BranchCode)));
+        command.CommandTimeout = 60;
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -278,53 +291,54 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<int> DeleteAsync(int id)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_Delete", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add(new SqlParameter("@Id", SqlDbType.Int) { Value = id });
+        using var command = Function(connection, "dbo.usp_VisitReport_Delete",
+            P("Id", NpgsqlDbType.Integer, id));
 
         await connection.OpenAsync();
         var result = await command.ExecuteScalarAsync();
         return result == null ? 0 : Convert.ToInt32(result);
     }
-    private static void AddHeaderParameters(SqlCommand command, VisitReportDto dto)
+    private static void AddHeaderParameters(NpgsqlCommand command, VisitReportDto dto)
     {
-        command.Parameters.Add(new SqlParameter("@BranchName", SqlDbType.NVarChar, 200) { Value = (object)dto.BranchName ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@HeadName", SqlDbType.NVarChar, 200) { Value = (object)dto.HeadName ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@EmployeeCode", SqlDbType.NVarChar, 50) { Value = (object)dto.EmployeeCode ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@VisitDateTime", SqlDbType.DateTime2) { Value = (object)dto.VisitDateTime ?? DBNull.Value });
+        command.Parameters.Add(P("BranchName", NpgsqlDbType.Varchar, dto.BranchName));
+        command.Parameters.Add(P("HeadName", NpgsqlDbType.Varchar, dto.HeadName));
+        command.Parameters.Add(P("EmployeeCode", NpgsqlDbType.Varchar, dto.EmployeeCode));
+        command.Parameters.Add(P("VisitDateTime", NpgsqlDbType.Timestamp, dto.VisitDateTime));
 
-        command.Parameters.Add(new SqlParameter("@DemandForMonth", SqlDbType.Decimal) { Precision = 18, Scale = 2, Value = (object)dto.DemandForMonth ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@CollectionAmount", SqlDbType.Decimal) { Precision = 18, Scale = 2, Value = (object)dto.CollectionAmount ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@Shortfall", SqlDbType.Decimal) { Precision = 18, Scale = 2, Value = (object)dto.Shortfall ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@CollectionPercent", SqlDbType.Decimal) { Precision = 5, Scale = 2, Value = (object)dto.CollectionPercent ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@CollectionRemarks", SqlDbType.NVarChar, 500) { Value = (object)dto.CollectionRemarks ?? DBNull.Value });
+        command.Parameters.Add(P("DemandForMonth", NpgsqlDbType.Numeric, dto.DemandForMonth));
+        command.Parameters.Add(P("CollectionAmount", NpgsqlDbType.Numeric, dto.CollectionAmount));
+        command.Parameters.Add(P("Shortfall", NpgsqlDbType.Numeric, dto.Shortfall));
+        command.Parameters.Add(P("CollectionPercent", NpgsqlDbType.Numeric, dto.CollectionPercent));
+        command.Parameters.Add(P("CollectionRemarks", NpgsqlDbType.Varchar, dto.CollectionRemarks));
 
-        command.Parameters.Add(new SqlParameter("@ObsBusiness", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsBusiness ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ObsCash", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsCash ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ObsOd", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsOd ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ObsNpa", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsNpa ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ObsCollection", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsCollection ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ObsAudit", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsAudit ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@ObsOthers", SqlDbType.NVarChar, -1) { Value = (object)dto.ObsOthers ?? DBNull.Value });
+        command.Parameters.Add(P("ObsBusiness", NpgsqlDbType.Text, dto.ObsBusiness));
+        command.Parameters.Add(P("ObsCash", NpgsqlDbType.Text, dto.ObsCash));
+        command.Parameters.Add(P("ObsOd", NpgsqlDbType.Text, dto.ObsOd));
+        command.Parameters.Add(P("ObsNpa", NpgsqlDbType.Text, dto.ObsNpa));
+        command.Parameters.Add(P("ObsCollection", NpgsqlDbType.Text, dto.ObsCollection));
+        command.Parameters.Add(P("ObsAudit", NpgsqlDbType.Text, dto.ObsAudit));
+        command.Parameters.Add(P("ObsOthers", NpgsqlDbType.Text, dto.ObsOthers));
 
-        command.Parameters.Add(new SqlParameter("@SignatureName", SqlDbType.NVarChar, 200) { Value = (object)dto.SignatureName ?? DBNull.Value });
-        command.Parameters.Add(new SqlParameter("@SignatureDate", SqlDbType.Date) { Value = (object)dto.SignatureDate ?? DBNull.Value });
+        command.Parameters.Add(P("SignatureName", NpgsqlDbType.Varchar, dto.SignatureName));
+        command.Parameters.Add(P("SignatureDate", NpgsqlDbType.Date, dto.SignatureDate?.Date));
     }
-    private static void AddTvpParameters(SqlCommand command, VisitReportDto dto)
+    private static void AddTvpParameters(NpgsqlCommand command, VisitReportDto dto)
     {
-        AddTvp(command, "@BusinessDevelopments", "dbo.BusinessDevelopmentRowType", ToBusinessDevelopmentTable(dto.BusinessDevelopments));
-        AddTvp(command, "@CashManagements", "dbo.CashManagementRowType", ToCashManagementTable(dto.CashManagements));
-        AddTvp(command, "@NpaOdManagements", "dbo.NpaOdManagementRowType", ToNpaOdManagementTable(dto.NpaOdManagements));
-        AddTvp(command, "@NpaBorrowers", "dbo.NpaBorrowerRowType", ToNpaBorrowerTable(dto.NpaBorrowers));
-        AddTvp(command, "@ConcurrentAudits", "dbo.ConcurrentAuditRowType", ToConcurrentAuditTable(dto.ConcurrentAudits));
+        AddTvp(command, "BusinessDevelopments", "dbo.BusinessDevelopmentRowType", ToBusinessDevelopmentTable(dto.BusinessDevelopments));
+        AddTvp(command, "CashManagements", "dbo.CashManagementRowType", ToCashManagementTable(dto.CashManagements));
+        AddTvp(command, "NpaOdManagements", "dbo.NpaOdManagementRowType", ToNpaOdManagementTable(dto.NpaOdManagements));
+        AddTvp(command, "NpaBorrowers", "dbo.NpaBorrowerRowType", ToNpaBorrowerTable(dto.NpaBorrowers));
+        AddTvp(command, "ConcurrentAudits", "dbo.ConcurrentAuditRowType", ToConcurrentAuditTable(dto.ConcurrentAudits));
     }
-    private static void AddTvp(SqlCommand command, string paramName, string typeName, DataTable table)
+    /// <summary>
+    /// PostgreSQL has no Table-Valued Parameters: the row set is sent as a JSONB
+    /// array and expanded with jsonb_to_recordset inside the function.
+    /// typeName is kept only to document which old SQL Server table type it replaces.
+    /// </summary>
+    private static void AddTvp(NpgsqlCommand command, string paramName, string typeName, DataTable table)
     {
-        var parameter = command.Parameters.AddWithValue(paramName, table);
-        parameter.SqlDbType = SqlDbType.Structured;
-        parameter.TypeName = typeName;
+        _ = typeName;
+        command.Parameters.Add(Json(paramName, table));
     }
     private static DataTable ToBusinessDevelopmentTable(List<BusinessDevelopmentRowDto> rows)
     {
@@ -422,7 +436,7 @@ public class VisitReportRepository : IVisitReportRepository
         }
         return table;
     }
-    private static VisitReportDto MapHeader(SqlDataReader reader) => new()
+    private static VisitReportDto MapHeader(DbDataReader reader) => new()
     {
         Id = reader.GetInt32Value("Id"),
         BranchName = reader.GetValueOrDefault<string>("BranchName"),
@@ -461,7 +475,7 @@ public class VisitReportRepository : IVisitReportRepository
         CreatedAtUtc = reader.GetValueOrDefault<DateTime?>("CreatedAtUtc"),
         UpdatedAtUtc = reader.GetValueOrDefault<DateTime?>("UpdatedAtUtc"),
     };
-    private static string TryGetString(SqlDataReader reader, string columnName)
+    private static string TryGetString(DbDataReader reader, string columnName)
     {
         try
         {
@@ -478,7 +492,7 @@ public class VisitReportRepository : IVisitReportRepository
             return null;
         }
     }
-    private static BusinessDevelopmentRowDto MapBusinessDevelopmentRow(SqlDataReader reader) => new()
+    private static BusinessDevelopmentRowDto MapBusinessDevelopmentRow(DbDataReader reader) => new()
     {
         RowOrder = reader.GetInt32Value("RowOrder"),
         TypeOfLoan = reader.GetValueOrDefault<string>("TypeOfLoan"),
@@ -486,14 +500,14 @@ public class VisitReportRepository : IVisitReportRepository
         Sanctioned = reader.GetValueOrDefault<decimal?>("Sanctioned"),
         Disbursed = reader.GetValueOrDefault<decimal?>("Disbursed"),
     };
-    private static CashManagementRowDto MapCashManagementRow(SqlDataReader reader) => new()
+    private static CashManagementRowDto MapCashManagementRow(DbDataReader reader) => new()
     {
         RowOrder = reader.GetInt32Value("RowOrder"),
         Particulars = reader.GetValueOrDefault<string>("Particulars"),
         Observation = reader.GetValueOrDefault<string>("Observation"),
         Remarks = reader.GetValueOrDefault<string>("Remarks"),
     };
-    private static NpaOdManagementRowDto MapNpaOdManagementRow(SqlDataReader reader) => new()
+    private static NpaOdManagementRowDto MapNpaOdManagementRow(DbDataReader reader) => new()
     {
         RowOrder = reader.GetInt32Value("RowOrder"),
         Particulars = reader.GetValueOrDefault<string>("Particulars"),
@@ -501,7 +515,7 @@ public class VisitReportRepository : IVisitReportRepository
         RecoveryMade = reader.GetValueOrDefault<decimal?>("RecoveryMade"),
         Remarks = reader.GetValueOrDefault<string>("Remarks"),
     };
-    private static NpaBorrowerRowDto MapNpaBorrowerRow(SqlDataReader reader) => new()
+    private static NpaBorrowerRowDto MapNpaBorrowerRow(DbDataReader reader) => new()
     {
         RowOrder = reader.GetInt32Value("RowOrder"),
         BorrowerName = reader.GetValueOrDefault<string>("BorrowerName"),
@@ -509,14 +523,14 @@ public class VisitReportRepository : IVisitReportRepository
         AmountRecovered = reader.GetValueOrDefault<decimal?>("AmountRecovered"),
         Remarks = reader.GetValueOrDefault<string>("Remarks"),
     };
-    private static ConcurrentAuditRowDto MapConcurrentAuditRow(SqlDataReader reader) => new()
+    private static ConcurrentAuditRowDto MapConcurrentAuditRow(DbDataReader reader) => new()
     {
         RowOrder = reader.GetInt32Value("RowOrder"),
         AuditorObservation = reader.GetValueOrDefault<string>("AuditorObservation"),
         BranchCompliance = reader.GetValueOrDefault<string>("BranchCompliance"),
         Remarks = reader.GetValueOrDefault<string>("Remarks"),
     };
-    private static AttachmentDto MapAttachment(SqlDataReader reader) => new()
+    private static AttachmentDto MapAttachment(DbDataReader reader) => new()
     {
         Id = reader.GetInt32Value("Id"),
         VisitReportId = reader.GetInt32Value("VisitReportId"),
@@ -531,22 +545,17 @@ public class VisitReportRepository : IVisitReportRepository
     {
         using var connection = _connectionFactory.CreateConnection();
 
-        using var command = new SqlCommand("dbo.usp_VisitReport_UploadDoc", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-
-        command.Parameters.Add("@VisitReportId", SqlDbType.Int).Value = visitReportId;
-
-        command.Parameters.Add("@BusinessTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.BusinessTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@CashTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.CashTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@OdTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.OdTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@NpaTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.NpaTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@CollectionTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.CollectionTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@AuditTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.AuditTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@OthersTypeImg", SqlDbType.NVarChar, -1).Value = (object?)dto.OthersTypeImg ?? DBNull.Value;
-        command.Parameters.Add("@Email", SqlDbType.NVarChar, 100).Value = DBNull.Value;
-        command.Parameters.Add("@Mode", SqlDbType.VarChar, 20).Value = "UPDATE";
+        using var command = Function(connection, "dbo.usp_VisitReport_UploadDoc",
+            P("VisitReportId", NpgsqlDbType.Integer, visitReportId),
+            P("BusinessTypeImg", NpgsqlDbType.Text, dto.BusinessTypeImg),
+            P("CashTypeImg", NpgsqlDbType.Text, dto.CashTypeImg),
+            P("OdTypeImg", NpgsqlDbType.Text, dto.OdTypeImg),
+            P("NpaTypeImg", NpgsqlDbType.Text, dto.NpaTypeImg),
+            P("CollectionTypeImg", NpgsqlDbType.Text, dto.CollectionTypeImg),
+            P("AuditTypeImg", NpgsqlDbType.Text, dto.AuditTypeImg),
+            P("OthersTypeImg", NpgsqlDbType.Text, dto.OthersTypeImg),
+            P("Email", NpgsqlDbType.Varchar, DBNull.Value),
+            P("Mode", NpgsqlDbType.Varchar, "UPDATE"));
         await connection.OpenAsync();
         await command.ExecuteNonQueryAsync();
     }
@@ -555,11 +564,11 @@ public class VisitReportRepository : IVisitReportRepository
         if (string.IsNullOrWhiteSpace(empCode)) return null;
 
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_GetLoginProfile", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add("@EmpCode", SqlDbType.NVarChar, 50).Value = empCode.Trim();
+        // Result 1 = profile row, result 2 = branch list (was 2 result sets of one SP)
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_GetLoginProfile", "EmpCode"),
+            Call("dbo.usp_VisitReport_GetLoginBranches", "EmpCode")), connection);
+        command.Parameters.Add(P("EmpCode", NpgsqlDbType.Varchar, empCode.Trim()));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -619,7 +628,7 @@ public class VisitReportRepository : IVisitReportRepository
 
         return profile;
     }
-    private static bool HasColumn(SqlDataReader reader, string columnName)
+    private static bool HasColumn(DbDataReader reader, string columnName)
     {
         for (var i = 0; i < reader.FieldCount; i++)
         {
@@ -631,15 +640,12 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<int> AddCommentAsync(int visitReportId, AddVisitReportCommentRequest req)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_AddComment", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add("@VisitReportId", SqlDbType.Int).Value = visitReportId;
-        command.Parameters.Add("@EmployeeCode", SqlDbType.NVarChar, 50).Value = (object)req.EmployeeCode ?? DBNull.Value;
-        command.Parameters.Add("@CommentText", SqlDbType.NVarChar, -1).Value = req.CommentText ?? "";
-        command.Parameters.Add("@CreatedByEmail", SqlDbType.NVarChar, 200).Value = (object)req.CreatedByEmail ?? DBNull.Value;
-        command.Parameters.Add("@CreatedByName", SqlDbType.NVarChar, 200).Value = (object)req.CreatedByName ?? DBNull.Value;
+        using var command = Function(connection, "dbo.usp_VisitReport_AddComment",
+            P("VisitReportId", NpgsqlDbType.Integer, visitReportId),
+            P("EmployeeCode", NpgsqlDbType.Varchar, req.EmployeeCode),
+            P("CommentText", NpgsqlDbType.Text, req.CommentText ?? ""),
+            P("CreatedByEmail", NpgsqlDbType.Varchar, req.CreatedByEmail),
+            P("CreatedByName", NpgsqlDbType.Varchar, req.CreatedByName));
 
         await connection.OpenAsync();
         var result = await command.ExecuteScalarAsync();
@@ -648,11 +654,8 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<List<VisitReportCommentDto>> GetCommentsAsync(int visitReportId)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_GetComments", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add("@VisitReportId", SqlDbType.Int).Value = visitReportId;
+        using var command = Function(connection, "dbo.usp_VisitReport_GetComments",
+            P("VisitReportId", NpgsqlDbType.Integer, visitReportId));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -677,14 +680,15 @@ public class VisitReportRepository : IVisitReportRepository
     {
         query ??= new MappingListQuery();
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_CreatorMapping_List", connection)
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_CreatorMapping_List", "Page", "PageSize", "EmpCode"),
+            Call("dbo.usp_VisitReport_CreatorMapping_Count", "EmpCode")), connection)
         {
-            CommandType = CommandType.StoredProcedure,
             CommandTimeout = 60
         };
-        command.Parameters.Add(new SqlParameter("@Page", SqlDbType.Int) { Value = query.Page < 1 ? 1 : query.Page });
-        command.Parameters.Add(new SqlParameter("@PageSize", SqlDbType.Int) { Value = query.PageSize < 1 ? 10 : query.PageSize });
-        command.Parameters.Add(new SqlParameter("@EmpCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmpCode) });
+        command.Parameters.Add(P("Page", NpgsqlDbType.Integer, query.Page < 1 ? 1 : query.Page));
+        command.Parameters.Add(P("PageSize", NpgsqlDbType.Integer, query.PageSize < 1 ? 10 : query.PageSize));
+        command.Parameters.Add(P("EmpCode", NpgsqlDbType.Varchar, DbStr(query.EmpCode)));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -718,12 +722,9 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<bool> UpdateCreatorMappingStatusAsync(int id, bool isActive)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_CreatorMapping_UpdateStatus", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add(new SqlParameter("@Id", SqlDbType.Int) { Value = id });
-        command.Parameters.Add(new SqlParameter("@IsActive", SqlDbType.Bit) { Value = isActive });
+        using var command = Function(connection, "dbo.usp_VisitReport_CreatorMapping_UpdateStatus",
+            P("Id", NpgsqlDbType.Integer, id),
+            P("IsActive", NpgsqlDbType.Boolean, isActive));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -750,18 +751,12 @@ public class VisitReportRepository : IVisitReportRepository
                 row.BranchCode?.Trim());
         }
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_CreatorMapping_BulkUpload", connection)
-        {
-            CommandType = CommandType.StoredProcedure,
-            CommandTimeout = 120
-        };
-        var tvp = command.Parameters.AddWithValue("@Rows", table);
-        tvp.SqlDbType = SqlDbType.Structured;
-        tvp.TypeName = "dbo.VisitReportCreatorMappingUploadType";
-        command.Parameters.Add(new SqlParameter("@CreatedBy", SqlDbType.NVarChar, 100)
-        {
-            Value = string.IsNullOrWhiteSpace(request.CreatedBy) ? DBNull.Value : request.CreatedBy.Trim()
-        });
+        // Rows go as JSONB (replaces TVP dbo.VisitReportCreatorMappingUploadType)
+        using var command = Function(connection, "dbo.usp_VisitReport_CreatorMapping_BulkUpload",
+            Json("Rows", table),
+            P("CreatedBy", NpgsqlDbType.Varchar,
+                string.IsNullOrWhiteSpace(request.CreatedBy) ? DBNull.Value : request.CreatedBy.Trim()));
+        command.CommandTimeout = 120;
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -779,14 +774,15 @@ public class VisitReportRepository : IVisitReportRepository
     {
         query ??= new MappingListQuery();
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_ReportingMapping_List", connection)
+        using var command = new NpgsqlCommand(string.Join("; ",
+            Call("dbo.usp_VisitReport_ReportingMapping_List", "Page", "PageSize", "EmpCode"),
+            Call("dbo.usp_VisitReport_ReportingMapping_Count", "EmpCode")), connection)
         {
-            CommandType = CommandType.StoredProcedure,
             CommandTimeout = 60
         };
-        command.Parameters.Add(new SqlParameter("@Page", SqlDbType.Int) { Value = query.Page < 1 ? 1 : query.Page });
-        command.Parameters.Add(new SqlParameter("@PageSize", SqlDbType.Int) { Value = query.PageSize < 1 ? 10 : query.PageSize });
-        command.Parameters.Add(new SqlParameter("@EmpCode", SqlDbType.NVarChar, 50) { Value = DbStr(query.EmpCode) });
+        command.Parameters.Add(P("Page", NpgsqlDbType.Integer, query.Page < 1 ? 1 : query.Page));
+        command.Parameters.Add(P("PageSize", NpgsqlDbType.Integer, query.PageSize < 1 ? 10 : query.PageSize));
+        command.Parameters.Add(P("EmpCode", NpgsqlDbType.Varchar, DbStr(query.EmpCode)));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -819,12 +815,9 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<bool> UpdateReportingMappingStatusAsync(int id, bool isActive)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new SqlCommand("dbo.usp_VisitReport_ReportingMapping_UpdateStatus", connection)
-        {
-            CommandType = CommandType.StoredProcedure
-        };
-        command.Parameters.Add(new SqlParameter("@Id", SqlDbType.Int) { Value = id });
-        command.Parameters.Add(new SqlParameter("@IsActive", SqlDbType.Bit) { Value = isActive });
+        using var command = Function(connection, "dbo.usp_VisitReport_ReportingMapping_UpdateStatus",
+            P("Id", NpgsqlDbType.Integer, id),
+            P("IsActive", NpgsqlDbType.Boolean, isActive));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -833,5 +826,5 @@ public class VisitReportRepository : IVisitReportRepository
         return false;
     }
     private static object DbStr(string value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
-    private static string ReadStr(SqlDataReader reader, string col) => reader[col] == DBNull.Value ? null : Convert.ToString(reader[col])?.Trim();
+    private static string ReadStr(DbDataReader reader, string col) => reader[col] == DBNull.Value ? null : Convert.ToString(reader[col])?.Trim();
 }

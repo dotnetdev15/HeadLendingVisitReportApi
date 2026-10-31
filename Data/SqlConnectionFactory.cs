@@ -1,16 +1,17 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace HeadLendingVisitReportApi.Data;
 
 public interface ISqlConnectionFactory
 {
-    SqlConnection CreateConnection();
+    NpgsqlConnection CreateConnection();
 }
 
 /// <summary>
-/// Hands out plain ADO.NET SqlConnection instances built from the
-/// "DefaultConnection" connection string. No ORM involved — every
-/// query in this project goes through a stored procedure.
+/// Hands out plain ADO.NET NpgsqlConnection instances built from the
+/// "DefaultConnection" connection string in appsettings.json. No ORM
+/// involved — every query in this project goes through a PostgreSQL
+/// function (the former SQL Server stored procedures).
 /// </summary>
 public class SqlConnectionFactory : ISqlConnectionFactory
 {
@@ -22,5 +23,5 @@ public class SqlConnectionFactory : ISqlConnectionFactory
             ?? throw new InvalidOperationException("Connection string 'DefaultConnection' is not configured.");
     }
 
-    public SqlConnection CreateConnection() => new(_connectionString);
+    public NpgsqlConnection CreateConnection() => new(_connectionString);
 }

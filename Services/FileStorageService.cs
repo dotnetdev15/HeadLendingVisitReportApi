@@ -3,7 +3,7 @@ namespace HeadLendingVisitReportApi.Services;
 /// <summary>
 /// Stores uploaded files on the local file system, under
 /// {RootPath}/{visitReportId}/{guid}_{originalFileName}. Only the
-/// relative path is ever persisted to SQL Server — this class is the
+/// relative path is ever persisted to PostgreSQL — this class is the
 /// only place that knows the absolute disk location.
 /// </summary>
 public class FileStorageService : IFileStorageService

@@ -2,6 +2,11 @@ using HeadLendingVisitReportApi.Data;
 using HeadLendingVisitReportApi.Repositories;
 using HeadLendingVisitReportApi.Services;
 
+// Npgsql 6+ only accepts UTC DateTimes for 'timestamp with time zone' and rejects
+// UTC DateTimes for 'timestamp'. The API previously sent whatever DateTime the
+// client posted to SQL Server DATETIME2, so keep that (legacy) behaviour.
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ---- MVC / Swagger ----
@@ -13,7 +18,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "Head Lending Visit Report API",
         Version = "v1",
-        Description = "ADO.NET + stored-procedure backend for the Visit Report of Head (Lending) form."
+        Description = "ADO.NET (Npgsql) + PostgreSQL-function backend for the Visit Report of Head (Lending) form."
     });
 });
 

@@ -1,39 +1,47 @@
 # Head Lending Visit Report API
 
 .NET 6 Web API backend for the "Visit Report of Head (Lending)" form. Pure ADO.NET
-(`Microsoft.Data.SqlClient`) — no EF Core, no ORM. Every read/write goes through a
-SQL Server stored procedure; dynamic row-sections (loan types, borrowers, audit
-points, etc.) are sent to SQL Server as Table-Valued Parameters so a whole report,
-however many rows the user added, is written in one round trip and one transaction.
+(**Npgsql**) — no EF Core, no ORM. Database: **PostgreSQL 10.3**.
+
+The project was migrated from SQL Server. PostgreSQL 10 has no `CREATE PROCEDURE`
+(added in v11), so every former stored procedure is a **PostgreSQL function with the
+same name** (`dbo.usp_VisitReport_Create`, `dbo.usp_Attachment_Insert`, ...). The API
+calls them with `SELECT * FROM dbo.fn(@p1, @p2, ...)`.
+
+* **Table-Valued Parameters → JSONB.** The dynamic row-sections are still built as
+  DataTables, then sent as a JSONB array and expanded with `jsonb_to_recordset`.
+  A plpgsql function runs in one transaction, so a whole report is still written
+  all-or-nothing in one round trip.
+* **Multiple result sets → batched calls.** Procedures that returned several result
+  sets (GetById, the paged lists + `TotalCount`, login profile) are now several
+  functions sent in one batched command, so `reader.NextResultAsync()` logic is unchanged.
+* SQL Server's case-insensitive `LIKE` became `ILIKE`; e-mails compare with `LOWER()`.
 
 ## 1. Create the database objects
 
-Run the scripts in `Scripts/` **in order** against your SQL Server instance
-(SSMS, Azure Data Studio, or `sqlcmd`):
+Run the scripts in `Scripts/PostgreSQL/` **in order** with `psql`:
 
 ```bash
-sqlcmd -S localhost -E -i Scripts/001_CreateTables.sql
-sqlcmd -S localhost -E -i Scripts/002_CreateTableTypes.sql
-sqlcmd -S localhost -E -i Scripts/003_VisitReportProcedures.sql
-sqlcmd -S localhost -E -i Scripts/004_AttachmentProcedures.sql
+psql -h <host> -U <user> -d <database> -f Scripts/PostgreSQL/001_CreateTables.sql
+psql -h <host> -U <user> -d <database> -f Scripts/PostgreSQL/002_MasterTables.sql   # skip if you migrate the ERP master tables yourself
+psql -h <host> -U <user> -d <database> -f Scripts/PostgreSQL/003_VisitReportFunctions.sql
+psql -h <host> -U <user> -d <database> -f Scripts/PostgreSQL/004_AttachmentFunctions.sql
+psql -h <host> -U <user> -d <database> -f Scripts/PostgreSQL/005_ListingAndAdminFunctions.sql
 ```
 
-This creates the `HeadLendingVisitReportDb` database, the six tables
-(`LendingVisitReports` + 5 child tables + `LendingVisitAttachments`), the five
-Table-Valued Parameter types, and all stored procedures.
+Everything lives in a `dbo` schema so object names match the old ones. The original
+SQL Server scripts are still in `Scripts/` for reference.
 
 ## 2. Configure the connection string
 
-Edit `appsettings.json` / `appsettings.Development.json`:
+The API reads `ConnectionStrings:DefaultConnection` from `appsettings.json` /
+`appsettings.Development.json` (Npgsql format):
 
 ```json
 "ConnectionStrings": {
-  "DefaultConnection": "Server=localhost;Database=HeadLendingVisitReportDb;Trusted_Connection=True;TrustServerCertificate=True;"
+  "DefaultConnection": "Host=<server>;Port=5432;Database=<db>;Username=<user>;Password=<password>;Pooling=true;Timeout=30;Command Timeout=0"
 }
 ```
-
-Swap in SQL auth (`User Id=...;Password=...;`) if you're not using Windows/Entra
-integrated auth.
 
 ## 3. Run the API
 
@@ -44,9 +52,8 @@ dotnet run
 
 Swagger UI opens at `/swagger` and lists every endpoint below.
 
-> **Note:** this sandbox doesn't have the .NET SDK installed, so this project was
-> hand-written and reviewed but not compiled here — build it locally with the
-> .NET 6 SDK before relying on it.
+> **Note:** the PostgreSQL scripts were executed and smoke-tested, but the C# was not
+> compiled in the migration environment — run `dotnet build` locally first.
 
 ## Endpoints
 
@@ -66,7 +73,7 @@ Swagger UI opens at `/swagger` and lists every endpoint below.
 
 Uploaded files are saved under `App_Data/Uploads/{visitReportId}/{guid}_{originalName}`
 (configurable via `FileStorage:RootPath` in `appsettings.json`). Only the relative
-path is stored in SQL Server — `FileStorageService` is the only place that resolves
+path is stored in PostgreSQL — `FileStorageService` is the only place that resolves
 it to an absolute disk path, with a path-traversal guard.
 
 ## Request body shape (Create / Update)
