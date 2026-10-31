@@ -1,15 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>HeadLendingVisitReportApi</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- PostgreSQL ADO.NET provider (replaces Microsoft.Data.SqlClient). 7.0.x is the line that targets .NET 6. -->
-    <PackageReference Include="Npgsql" Version="7.0.7" />
+    <!-- PostgreSQL ADO.NET provider (replaces Microsoft.Data.SqlClient). Npgsql 10 requires .NET 8+. -->
+    <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
   </ItemGroup>
 

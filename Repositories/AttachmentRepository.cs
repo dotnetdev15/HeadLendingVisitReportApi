@@ -5,28 +5,28 @@ using HeadLendingVisitReportApi.Models.Dtos;
 using HeadLendingVisitReportApi.Models.Entities;
 using Npgsql;
 using NpgsqlTypes;
-using static HeadLendingVisitReportApi.Data.PgCommand;
+using static HeadLendingVisitReportApi.Data.PostgresCommandBuilder;
 
 namespace HeadLendingVisitReportApi.Repositories;
 
 public class AttachmentRepository : IAttachmentRepository
 {
-    private readonly ISqlConnectionFactory _connectionFactory;
+    private readonly IDbConnectionFactory _connectionFactory;
 
-    public AttachmentRepository(ISqlConnectionFactory connectionFactory)
+    public AttachmentRepository(IDbConnectionFactory connectionFactory)
     {
         _connectionFactory = connectionFactory;
     }
     public async Task<int> InsertAsync(AttachmentRecord record)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = Function(connection, "dbo.usp_Attachment_Insert",
-            P("VisitReportId", NpgsqlDbType.Integer, record.VisitReportId),
-            P("FileName", NpgsqlDbType.Varchar, record.FileName),
-            P("StoredFileName", NpgsqlDbType.Varchar, record.StoredFileName),
-            P("FilePath", NpgsqlDbType.Varchar, record.FilePath),
-            P("ContentType", NpgsqlDbType.Varchar, record.ContentType),
-            P("FileSizeBytes", NpgsqlDbType.Bigint, record.FileSizeBytes));
+        using var command = CreateFunctionCommand(connection, "public.\"usp_Attachment_Insert\"",
+            CreateParameter("VisitReportId", NpgsqlDbType.Integer, record.VisitReportId),
+            CreateParameter("FileName", NpgsqlDbType.Varchar, record.FileName),
+            CreateParameter("StoredFileName", NpgsqlDbType.Varchar, record.StoredFileName),
+            CreateParameter("FilePath", NpgsqlDbType.Varchar, record.FilePath),
+            CreateParameter("ContentType", NpgsqlDbType.Varchar, record.ContentType),
+            CreateParameter("FileSizeBytes", NpgsqlDbType.Bigint, record.FileSizeBytes));
 
         await connection.OpenAsync();
         var result = await command.ExecuteScalarAsync();
@@ -35,8 +35,8 @@ public class AttachmentRepository : IAttachmentRepository
     public async Task<List<AttachmentRecord>> GetByVisitReportIdAsync(int visitReportId)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = Function(connection, "dbo.usp_Attachment_GetByVisitReportId",
-            P("VisitReportId", NpgsqlDbType.Integer, visitReportId));
+        using var command = CreateFunctionCommand(connection, "public.\"usp_Attachment_GetByVisitReportId\"",
+            CreateParameter("VisitReportId", NpgsqlDbType.Integer, visitReportId));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -48,8 +48,8 @@ public class AttachmentRepository : IAttachmentRepository
     public async Task<AttachmentRecord> GetByIdAsync(int id)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = Function(connection, "dbo.usp_Attachment_GetById",
-            P("Id", NpgsqlDbType.Integer, id));
+        using var command = CreateFunctionCommand(connection, "public.\"usp_Attachment_GetById\"",
+            CreateParameter("Id", NpgsqlDbType.Integer, id));
 
         await connection.OpenAsync();
         using var reader = await command.ExecuteReaderAsync();
@@ -59,8 +59,8 @@ public class AttachmentRepository : IAttachmentRepository
     public async Task<int> DeleteAsync(int id)
     {
         using var connection = _connectionFactory.CreateConnection();
-        using var command = Function(connection, "dbo.usp_Attachment_Delete",
-            P("Id", NpgsqlDbType.Integer, id));
+        using var command = CreateFunctionCommand(connection, "public.\"usp_Attachment_Delete\"",
+            CreateParameter("Id", NpgsqlDbType.Integer, id));
 
         await connection.OpenAsync();
         var result = await command.ExecuteScalarAsync();

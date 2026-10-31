@@ -40,7 +40,7 @@ builder.Services.AddCors(options =>
 });
 
 // ---- Data access (ADO.NET, no ORM) ----
-builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
+builder.Services.AddSingleton<IDbConnectionFactory, PostgresConnectionFactory>();
 builder.Services.AddScoped<IVisitReportRepository, VisitReportRepository>();
 builder.Services.AddScoped<IAttachmentRepository, AttachmentRepository>();
 

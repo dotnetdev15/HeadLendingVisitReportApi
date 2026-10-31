@@ -1,6 +1,6 @@
 # Head Lending Visit Report API
 
-.NET 6 Web API backend for the "Visit Report of Head (Lending)" form. Pure ADO.NET
+.NET 8 Web API backend for the "Visit Report of Head (Lending)" form. Pure ADO.NET
 (**Npgsql**) — no EF Core, no ORM. Database: **PostgreSQL 10.3**.
 
 The project was migrated from SQL Server. PostgreSQL 10 has no `CREATE PROCEDURE`
@@ -32,16 +32,25 @@ psql -h <host> -U <user> -d <database> -f Scripts/PostgreSQL/005_ListingAndAdmin
 Everything lives in a `dbo` schema so object names match the old ones. The original
 SQL Server scripts are still in `Scripts/` for reference.
 
-## 2. Configure the connection string
+## 2. Configure the connection
 
-The API reads `ConnectionStrings:DefaultConnection` from `appsettings.json` /
-`appsettings.Development.json` (Npgsql format):
+The connection string is built in `Data/PostgresConnectionFactory.cs`
+(`GetPostgresConnectionString`) from the encrypted `Credntials` section of
+`appsettings.json`, the same pattern as PDL.ManagementService:
 
 ```json
-"ConnectionStrings": {
-  "DefaultConnection": "Host=<server>;Port=5432;Database=<db>;Username=<user>;Password=<password>;Pooling=true;Timeout=30;Command Timeout=0"
-}
+"Credntials": {
+  "HostIp": "<server ip>",
+  "Port": "5432",
+  "Username": "<encrypted>",
+  "Password": "<encrypted>",
+  "Database": "<encrypted>"
+},
+"encryptSalts": { "userSalt": "<salt>", "dbSalt": "<salt>" }
 ```
+
+`Username` is decrypted with `userSalt`; `Password` and `Database` with `dbSalt`
+(`Helpers/EncryptionHelper.Decrypt`).
 
 ## 3. Run the API
 
