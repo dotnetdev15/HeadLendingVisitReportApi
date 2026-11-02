@@ -9,14 +9,6 @@ using static HeadLendingVisitReportApi.Data.PostgresCommandBuilder;
 
 namespace HeadLendingVisitReportApi.Repositories;
 
-/// <summary>
-/// PostgreSQL (Npgsql) version. Every former SQL Server stored procedure is a
-/// PostgreSQL function of the same name (see Scripts/PostgreSQL). Procedures
-/// that returned several result sets are now several functions sent in one
-/// batched command, so the NextResultAsync() reading logic is unchanged.
-/// Table-Valued Parameters are sent as JSONB arrays built from the same
-/// DataTables as before.
-/// </summary>
 public class VisitReportRepository : IVisitReportRepository
 {
     private readonly IDbConnectionFactory _connectionFactory;
@@ -40,8 +32,6 @@ public class VisitReportRepository : IVisitReportRepository
             await connection.OpenAsync();
 
             var result = await command.ExecuteScalarAsync();
-
-            // The function returns jsonb {"VisitReportId": n}.
             return ReadIdFromResult(result, "VisitReportId");
         }
         catch (NpgsqlException ex)
