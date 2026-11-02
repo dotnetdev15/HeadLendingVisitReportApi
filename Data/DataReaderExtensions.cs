@@ -15,10 +15,18 @@ public static class DataReaderExtensions
 
         // Npgsql 10 returns PostgreSQL 'date' as DateOnly by default; the DTOs use DateTime.
         var targetType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
-        if (targetType == typeof(DateTime))
-            return (T)(object)reader.GetFieldValue<DateTime>(ordinal);
+        var value = reader.GetValue(ordinal);
+        if (value is T typed) return typed;
 
-        return (T)reader.GetValue(ordinal);
+        if (targetType == typeof(DateTime))
+        {
+            if (value is DateOnly dateOnly) return (T)(object)dateOnly.ToDateTime(TimeOnly.MinValue);
+            if (value is string text) return (T)(object)DateTime.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
+            return (T)(object)reader.GetFieldValue<DateTime>(ordinal);
+        }
+
+        // e.g. decimal -> long/int when the row came from the jsonb reader
+        return (T)Convert.ChangeType(value, targetType, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     public static int GetInt32Value(this DbDataReader reader, string columnName)

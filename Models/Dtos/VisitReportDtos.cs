@@ -1,4 +1,4 @@
-﻿namespace HeadLendingVisitReportApi.Models.Dtos;
+namespace HeadLendingVisitReportApi.Models.Dtos;
 
 public class LoginProfileDto
 {
@@ -110,6 +110,7 @@ public class VisitReportDto
     public List<NpaBorrowerRowDto> NpaBorrowers { get; set; } = new();
     public List<ConcurrentAuditRowDto> ConcurrentAudits { get; set; } = new();
     public List<AttachmentDto> Attachments { get; set; } = new();
+    [System.Text.Json.Serialization.JsonIgnore]   // files come only via multipart (Create); JSON (Update) ignores them
     public List<IFormFile> Files { get; set; } = new();
     public List<string> Categories { get; set; } = new();
 }

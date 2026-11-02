@@ -35,18 +35,30 @@ public class VisitReportRepository : IVisitReportRepository
 
             AddHeaderParameters(command, dto);
             AddTvpParameters(command, dto);
-            command.CommandText = BuildFunctionCall("public.\"usp_VisitReport_Create\"", command.Parameters.Select(parameter => parameter.ParameterName).ToArray());
+            command.CommandText = BuildNamedFunctionCall("public.\"usp_VisitReport_Create\"", command.Parameters.Select(parameter => parameter.ParameterName).ToArray());
 
             await connection.OpenAsync();
 
             var result = await command.ExecuteScalarAsync();
 
-            return Convert.ToInt32(result);
+            // The function returns jsonb {"VisitReportId": n}.
+            return ReadIdFromResult(result, "VisitReportId");
         }
         catch (NpgsqlException ex)
         {
             throw new Exception($"Failed to create visit report: {ex.Message}", ex);
         }
+    }
+    /// <summary>Reads an id returned either as a plain number or as a jsonb object ({"VisitReportId": n}).</summary>
+    private static int ReadIdFromResult(object result, string jsonPropertyName)
+    {
+        if (result == null || result == DBNull.Value) return 0;
+        if (result is string text && text.TrimStart().StartsWith("{"))
+        {
+            using var resultJson = JsonDocument.Parse(text);
+            return GetJsonInt(resultJson.RootElement, jsonPropertyName) ?? GetJsonInt(resultJson.RootElement, "Id") ?? 0;
+        }
+        return Convert.ToInt32(result);
     }
     public async Task<bool> UpdateAsync(int id, VisitReportDto dto)
     {
@@ -56,7 +68,8 @@ public class VisitReportRepository : IVisitReportRepository
         command.Parameters.Add(CreateParameter("Id", NpgsqlDbType.Integer, id));
         AddHeaderParameters(command, dto);
         AddTvpParameters(command, dto);
-        command.CommandText = BuildFunctionCall("public.\"usp_VisitReport_Update\"", command.Parameters.Select(parameter => parameter.ParameterName).ToArray());
+        // Named arguments (p_id => @Id, p_branchname => @BranchName, ...) – same as Create, so order does not matter.
+        command.CommandText = BuildNamedFunctionCall("public.\"usp_VisitReport_Update\"", command.Parameters.Select(parameter => parameter.ParameterName).ToArray());
 
         await connection.OpenAsync();
         var result = await command.ExecuteScalarAsync();
@@ -65,19 +78,14 @@ public class VisitReportRepository : IVisitReportRepository
     public async Task<VisitReportDto> GetByIdAsync(int id)
     {
         using var connection = _connectionFactory.CreateConnection();
-        // 7 result sets, same order as the old usp_VisitReport_GetById
-        using var command = new NpgsqlCommand(string.Join("; ",
-            BuildFunctionCall("public.\"usp_VisitReport_GetById\"", "Id"),
-            BuildFunctionCall("public.\"usp_VisitReport_GetBusinessDevelopments\"", "Id"),
-            BuildFunctionCall("public.\"usp_VisitReport_GetCashManagements\"", "Id"),
-            BuildFunctionCall("public.\"usp_VisitReport_GetNpaOdManagements\"", "Id"),
-            BuildFunctionCall("public.\"usp_VisitReport_GetNpaBorrowers\"", "Id"),
-            BuildFunctionCall("public.\"usp_VisitReport_GetConcurrentAudits\"", "Id"),
-            BuildFunctionCall("public.\"usp_Attachment_GetByVisitReportId\"", "Id")), connection);
+        // usp_VisitReport_GetById returns 7 cursors = the 7 result sets of the old SP (same order)
+        using var command = new NpgsqlCommand(BuildFunctionCall("public.\"usp_VisitReport_GetById\"", "Id"), connection);
         command.Parameters.Add(CreateParameter("Id", NpgsqlDbType.Integer, id));
 
         await connection.OpenAsync();
-        using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteJsonSetReaderAsync(
+     "branchname", "typeofloan", "observation", "recoverymade",
+     "borrowername", "auditorobservation", "uploadedatutc");
 
         if (!await reader.ReadAsync()) return null;
         var dto = MapHeader(reader);
@@ -110,17 +118,17 @@ public class VisitReportRepository : IVisitReportRepository
 
         var email = FirstNonEmpty(query.Email, query.ViewerEmail, query.email);
 
+        // public."usp_VisitReport_GetAll" returns SETOF jsonb: one object per report row,
+        // with the total in "TotalCount" on every row (old SP's 2nd result set).
         var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "SelectedEmpCode", "ViewRole" };
-        using var command = new NpgsqlCommand(string.Join("; ",
-            BuildFunctionCall("public.\"usp_VisitReport_GetAll\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()),
-            BuildFunctionCall("public.\"usp_VisitReport_GetAll_Count\"", filterNames)), connection);
+        using var command = new NpgsqlCommand(BuildFunctionCall("public.\"usp_VisitReport_GetAll\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()), connection);
 
         command.Parameters.Add(CreateParameter("Page", NpgsqlDbType.Integer, query.Page < 1 ? 1 : query.Page));
         command.Parameters.Add(CreateParameter("PageSize", NpgsqlDbType.Integer, query.PageSize < 1 ? 20 : query.PageSize));
         command.Parameters.Add(CreateParameter("BranchName", NpgsqlDbType.Varchar, ToDbString(query.BranchName)));
         command.Parameters.Add(CreateParameter("EmployeeCode", NpgsqlDbType.Varchar, ToDbString(query.EmployeeCode)));
-        command.Parameters.Add(CreateParameter("FromDate", NpgsqlDbType.Timestamp, ParseDbDate(query.FromDate)));
-        command.Parameters.Add(CreateParameter("ToDate", NpgsqlDbType.Timestamp, ParseDbDate(query.ToDate)));
+        command.Parameters.Add(CreateParameter("FromDate", NpgsqlDbType.TimestampTz, ParseDbDate(query.FromDate)));
+        command.Parameters.Add(CreateParameter("ToDate", NpgsqlDbType.TimestampTz, ParseDbDate(query.ToDate)));
         command.Parameters.Add(CreateParameter("Email", NpgsqlDbType.Varchar, ToDbString(email)));
         command.Parameters.Add(CreateParameter("SelectedEmpCode", NpgsqlDbType.Varchar, ToDbString(query.SelectedEmpCode)));
         command.Parameters.Add(CreateParameter("ViewRole", NpgsqlDbType.Varchar, ToDbString(query.ViewRole)));
@@ -129,12 +137,14 @@ public class VisitReportRepository : IVisitReportRepository
         using var reader = await command.ExecuteReaderAsync();
 
         var items = new List<VisitReportDto>();
-        while (await reader.ReadAsync()) items.Add(MapHeader(reader));
-
         var totalCount = 0;
-        if (await reader.NextResultAsync() && await reader.ReadAsync())
+        while (await reader.ReadAsync())
         {
-            totalCount = reader.GetInt32Value("TotalCount");
+            if (reader.IsDBNull(0)) continue;
+            using var rowJson = JsonDocument.Parse(reader.GetString(0));
+            var row = rowJson.RootElement;
+            items.Add(MapHeaderFromJson(row));
+            totalCount = GetJsonInt(row, "TotalCount") ?? totalCount;
         }
 
         return new PagedResult<VisitReportDto>
@@ -152,13 +162,10 @@ public class VisitReportRepository : IVisitReportRepository
         var email = FirstNonEmpty(query.Email, query.ViewerEmail, query.email);
         var empType = FirstNonEmpty(query.EmpType, query.ViewRole);
 
-        var empCode = FirstNonEmpty(query.EmpCode, query.empCode);
-
         using var connection = _connectionFactory.CreateConnection();
-        var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "EmpCode", "EmpType", "Search", "RoleName" };
-        using var command = new NpgsqlCommand(string.Join("; ",
-            BuildFunctionCall("public.\"usp_VisitReport_GetByRoleTeam\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()),
-            BuildFunctionCall("public.\"usp_VisitReport_GetByRoleTeam_Count\"", filterNames)), connection)
+        // Named arguments (p_page => @Page, ...). Only parameters that exist in the PostgreSQL function are sent.
+        var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "EmpType" };
+        using var command = new NpgsqlCommand(BuildNamedFunctionCall("public.\"usp_VisitReport_GetByRoleTeam\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()), connection)
         {
             CommandTimeout = 60
         };
@@ -170,20 +177,19 @@ public class VisitReportRepository : IVisitReportRepository
         command.Parameters.Add(CreateParameter("FromDate", NpgsqlDbType.Timestamp, ParseDbDate(query.FromDate)));
         command.Parameters.Add(CreateParameter("ToDate", NpgsqlDbType.Timestamp, ParseDbDate(query.ToDate)));
         command.Parameters.Add(CreateParameter("Email", NpgsqlDbType.Varchar, ToDbString(email)));
-        command.Parameters.Add(CreateParameter("EmpCode", NpgsqlDbType.Varchar, ToDbString(empCode)));
         command.Parameters.Add(CreateParameter("EmpType", NpgsqlDbType.Varchar, ToDbString(empType)));
-        command.Parameters.Add(CreateParameter("Search", NpgsqlDbType.Varchar, ToDbString(query.Search)));
-        command.Parameters.Add(CreateParameter("RoleName", NpgsqlDbType.Varchar, DBNull.Value));
 
         await connection.OpenAsync();
 
-        using var reader = await command.ExecuteReaderAsync();
+        // Function returns SETOF jsonb (one row per report, "TotalCount" inside every row)
+        using var reader = await command.ExecuteJsonSetReaderAsync("branchname");
         var items = new List<VisitReportDto>();
-        while (await reader.ReadAsync())
-            items.Add(MapHeader(reader));
         var totalCount = 0;
-        if (await reader.NextResultAsync() && await reader.ReadAsync())
-            totalCount = reader.GetInt32Value("TotalCount");
+        while (await reader.ReadAsync())
+        {
+            items.Add(MapHeader(reader));
+            if (totalCount == 0) totalCount = reader.GetInt32Value("TotalCount");
+        }
         return new PagedResult<VisitReportDto>
         {
             Items = items,
@@ -198,9 +204,7 @@ public class VisitReportRepository : IVisitReportRepository
 
         using var connection = _connectionFactory.CreateConnection();
         var filterNames = new[] { "FromDate", "ToDate", "EmpType", "Creator", "BranchCode", "EmployeeCode" };
-        using var command = new NpgsqlCommand(string.Join("; ",
-            BuildFunctionCall("public.\"usp_VisitReport_AdminVisitSummary\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()),
-            BuildFunctionCall("public.\"usp_VisitReport_AdminVisitSummary_Count\"", filterNames)), connection)
+        using var command = new NpgsqlCommand(BuildFunctionCall("public.\"usp_VisitReport_AdminVisitSummary\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()), connection)
         {
             CommandTimeout = 60
         };
@@ -215,7 +219,7 @@ public class VisitReportRepository : IVisitReportRepository
         command.Parameters.Add(CreateParameter("EmployeeCode", NpgsqlDbType.Varchar, ToDbString(query.EmployeeCode)));
 
         await connection.OpenAsync();
-        using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteJsonSetReaderAsync("empcode", "totalcount");
 
         var items = new List<AdminVisitSummaryDto>();
         while (await reader.ReadAsync())
@@ -259,7 +263,8 @@ public class VisitReportRepository : IVisitReportRepository
         command.CommandTimeout = 60;
 
         await connection.OpenAsync();
-        using var reader = await command.ExecuteReaderAsync();
+        // Works whether the DB function returns RETURNS TABLE columns or SETOF jsonb
+        using var reader = await command.ExecuteJsonSetReaderAsync();
 
         var items = new List<AdminVisitDetailDto>();
         while (await reader.ReadAsync())
@@ -476,6 +481,58 @@ public class VisitReportRepository : IVisitReportRepository
         CreatedAtUtc = reader.GetValueOrDefault<DateTime?>("CreatedAtUtc"),
         UpdatedAtUtc = reader.GetValueOrDefault<DateTime?>("UpdatedAtUtc"),
     };
+    /// <summary>Same mapping as MapHeader, for a report row returned as jsonb.</summary>
+    private static VisitReportDto MapHeaderFromJson(JsonElement row) => new()
+    {
+        Id = GetJsonInt(row, "Id") ?? 0,
+        BranchName = GetJsonString(row, "BranchName"),
+        HeadName = GetJsonString(row, "HeadName"),
+        EmployeeCode = GetJsonString(row, "EmployeeCode"),
+        VisitDateTime = GetJsonDateTime(row, "VisitDateTime"),
+
+        DemandForMonth = GetJsonDecimal(row, "DemandForMonth"),
+        CollectionAmount = GetJsonDecimal(row, "CollectionAmount"),
+        Shortfall = GetJsonDecimal(row, "Shortfall"),
+        CollectionPercent = GetJsonDecimal(row, "CollectionPercent"),
+        CollectionRemarks = GetJsonString(row, "CollectionRemarks"),
+
+        ObsBusiness = GetJsonString(row, "ObsBusiness"),
+        ObsCash = GetJsonString(row, "ObsCash"),
+        ObsOd = GetJsonString(row, "ObsOd"),
+        ObsNpa = GetJsonString(row, "ObsNpa"),
+        ObsCollection = GetJsonString(row, "ObsCollection"),
+        ObsAudit = GetJsonString(row, "ObsAudit"),
+        ObsOthers = GetJsonString(row, "ObsOthers"),
+
+        BusinessTypeImg = GetJsonString(row, "BusinessTypeImg"),
+        CashTypeImg = GetJsonString(row, "CashTypeImg"),
+        OdTypeImg = GetJsonString(row, "OdTypeImg"),
+        NpaTypeImg = GetJsonString(row, "NpaTypeImg"),
+        CollectionTypeImg = GetJsonString(row, "CollectionTypeImg"),
+        AuditTypeImg = GetJsonString(row, "AuditTypeImg"),
+        OthersTypeImg = GetJsonString(row, "OthersTypeImg"),
+
+        FormRole = GetJsonString(row, "FormRole"),
+
+        SignatureName = GetJsonString(row, "SignatureName"),
+        SignatureDate = GetJsonDateTime(row, "SignatureDate"),
+
+        CreatedAtUtc = GetJsonDateTime(row, "CreatedAtUtc"),
+        UpdatedAtUtc = GetJsonDateTime(row, "UpdatedAtUtc"),
+    };
+    private static decimal? GetJsonDecimal(JsonElement element, string propertyName)
+    {
+        if (!TryGetJsonProperty(element, propertyName, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number)) return number;
+        if (value.ValueKind == JsonValueKind.String && decimal.TryParse(value.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out number)) return number;
+        return null;
+    }
+    private static DateTime? GetJsonDateTime(JsonElement element, string propertyName)
+    {
+        var text = GetJsonString(element, propertyName);
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        return DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var date) ? date : null;
+    }
     private static string TryGetString(DbDataReader reader, string columnName)
     {
         try
@@ -708,9 +765,7 @@ public class VisitReportRepository : IVisitReportRepository
     {
         query ??= new MappingListQuery();
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new NpgsqlCommand(string.Join("; ",
-            BuildFunctionCall("public.\"usp_VisitReport_CreatorMapping_List\"", "Page", "PageSize", "EmpCode"),
-            BuildFunctionCall("public.\"usp_VisitReport_CreatorMapping_Count\"", "EmpCode")), connection)
+        using var command = new NpgsqlCommand(BuildFunctionCall("public.\"usp_VisitReport_CreatorMapping_List\"", "Page", "PageSize", "EmpCode"), connection)
         {
             CommandTimeout = 60
         };
@@ -719,7 +774,7 @@ public class VisitReportRepository : IVisitReportRepository
         command.Parameters.Add(CreateParameter("EmpCode", NpgsqlDbType.Varchar, ToDbString(query.EmpCode)));
 
         await connection.OpenAsync();
-        using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteJsonSetReaderAsync("empcode", "totalcount");
 
         var items = new List<CreatorMappingDto>();
         while (await reader.ReadAsync())
@@ -787,7 +842,8 @@ public class VisitReportRepository : IVisitReportRepository
         command.CommandTimeout = 120;
 
         await connection.OpenAsync();
-        using var reader = await command.ExecuteReaderAsync();
+       // using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteJsonSetReaderAsync();
         if (await reader.ReadAsync())
         {
             return new BulkUploadResultDto
@@ -802,9 +858,7 @@ public class VisitReportRepository : IVisitReportRepository
     {
         query ??= new MappingListQuery();
         using var connection = _connectionFactory.CreateConnection();
-        using var command = new NpgsqlCommand(string.Join("; ",
-            BuildFunctionCall("public.\"usp_VisitReport_ReportingMapping_List\"", "Page", "PageSize", "EmpCode"),
-            BuildFunctionCall("public.\"usp_VisitReport_ReportingMapping_Count\"", "EmpCode")), connection)
+        using var command = new NpgsqlCommand(BuildFunctionCall("public.\"usp_VisitReport_ReportingMapping_List\"", "Page", "PageSize", "EmpCode"), connection)
         {
             CommandTimeout = 60
         };
@@ -813,7 +867,7 @@ public class VisitReportRepository : IVisitReportRepository
         command.Parameters.Add(CreateParameter("EmpCode", NpgsqlDbType.Varchar, ToDbString(query.EmpCode)));
 
         await connection.OpenAsync();
-        using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteJsonSetReaderAsync("empcode", "totalcount");
 
         var items = new List<ReportingMappingDto>();
         while (await reader.ReadAsync())
