@@ -14,6 +14,17 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
+    var swaggerServerPrefix = builder.Configuration["Swagger:ServerPrefix"];
+    if (!string.IsNullOrWhiteSpace(swaggerServerPrefix))
+    {
+        // So Swagger "Try it out" calls go through Kong: /headlendingvisitreport/api/...
+        options.AddServer(new Microsoft.OpenApi.Models.OpenApiServer
+        {
+            Url = swaggerServerPrefix.TrimEnd('/'),
+            Description = "Kong Gateway"
+        });
+    }
+
     options.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
     {
         Title = "Head Lending Visit Report API",
@@ -49,12 +60,17 @@ builder.Services.AddSingleton<IFileStorageService, FileStorageService>();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+var enableSwagger = app.Environment.IsDevelopment()
+    || app.Configuration.GetValue("Swagger:Enabled", false);
+
+if (enableSwagger)
 {
     app.UseSwagger();
     app.UseSwaggerUI(options =>
     {
-        options.SwaggerEndpoint("/swagger/v1/swagger.json", "Head Lending Visit Report API v1");
+        // Relative path works when Kong strips /headlendingvisitreport
+        options.SwaggerEndpoint("v1/swagger.json", "Head Lending Visit Report API v1");
+        options.RoutePrefix = "swagger";
     });
 }
 
