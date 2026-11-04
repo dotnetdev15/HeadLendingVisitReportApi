@@ -154,7 +154,7 @@ public class VisitReportRepository : IVisitReportRepository
 
         using var connection = _connectionFactory.CreateConnection();
         // Named arguments (p_page => @Page, ...). Only parameters that exist in the PostgreSQL function are sent.
-        var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "EmpType" };
+        var filterNames = new[] { "BranchName", "EmployeeCode", "FromDate", "ToDate", "Email", "EmpType", "TeamFilter" };
         using var command = new NpgsqlCommand(BuildNamedFunctionCall("public.\"usp_VisitReport_GetByRoleTeam\"", new[] { "Page", "PageSize" }.Concat(filterNames).ToArray()), connection)
         {
             CommandTimeout = 60
@@ -168,6 +168,8 @@ public class VisitReportRepository : IVisitReportRepository
         command.Parameters.Add(CreateParameter("ToDate", NpgsqlDbType.Timestamp, ParseDbDate(query.ToDate)));
         command.Parameters.Add(CreateParameter("Email", NpgsqlDbType.Varchar, ToDbString(email)));
         command.Parameters.Add(CreateParameter("EmpType", NpgsqlDbType.Varchar, ToDbString(empType)));
+        // Logged-in user's EmpCode (old @EmpCode), sent in p_teamfilter: the function builds this user's team from it
+        command.Parameters.Add(CreateParameter("TeamFilter", NpgsqlDbType.Text, ToDbString(FirstNonEmpty(query.EmpCode, query.empCode))));
 
         await connection.OpenAsync();
 
